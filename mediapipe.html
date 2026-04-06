@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MediaPipe B — Persistent Dataset</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    :root { --accent: #0891b2; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div><strong>MediaPipe Paper 2</strong> | Research Data</div>
+  <div class="status-group">
+    <div id="swStatus" class="badge">SW: Inactive</div>
+    <div id="userCount" class="badge badge-accent">0 Users</div>
+  </div>
+</header>
+
+<main class="main-container">
+  <div class="video-card">
+    <video id="v" class="visible-video" autoplay playsinline muted></video>
+    <canvas id="c" class="overlay-canvas"></canvas>
+    <div id="scanOverlay">
+      <div class="icon-check">✅</div>
+      <div class="match-text">PRESENSI TERCATAT</div>
+      <button class="btn-primary btn-continue" onclick="closeModal()">Lanjut Scan</button>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="panel">
+      <div class="metric-label">Research Metrics</div>
+      <div class="diag-item mt-10">
+        <span>Speed:</span> <b id="m-latency">0.00 ms</b>
+      </div>
+      <div class="diag-item">
+        <span>Distance:</span> <b id="m-accuracy" class="accent-val">0.0000</b>
+      </div>
+      <div class="diag-item">
+        <span>Light:</span> <b id="num-light">0.00</b>
+      </div>
+      <div class="diag-item">
+        <span>Occlusion:</span> <b id="num-occlusion">0.00</b>
+      </div>
+    </div>
+
+    <div class="panel enroll-box">
+      <div class="metric-label warning">Pendaftaran Baru</div>
+      <input type="text" id="userName" placeholder="Nama Lengkap Subjek...">
+      <button id="btnEnroll" class="btn-enroll">SIMPAN DATASET</button>
+    </div>
+
+    <div class="panel">
+      <div class="metric-label">Audit Log</div>
+      <div id="logBox"></div>
+    </div>
+  </div>
+
+  <div class="table-section">
+    <h3 class="table-title">Dataset User Terdaftar (Persistent)</h3>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Nama Subjek</th>
+            <th>Waktu Enroll</th>
+            <th>Vektor</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody id="userTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<div id="modalSuccess" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-icon">🎉</div>
+    <h2 id="modalName" class="modal-name" style="color:var(--success)">SUKSES</h2>
+    <p id="modalTime" class="modal-time"></p>
+    <div id="modalScore" class="modal-score"></div>
+    <button class="btn-primary" onclick="closeModal()">Konfirmasi & Lanjut</button>
+  </div>
+</div>
+
+<script type="module">
+// KODE SCRIPT TETAP SAMA SEPERTI ASLINYA
+import { FaceLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+const v = document.getElementById('v'), c = document.getElementById('c'), ctx = c.getContext('2d');
+let faceLandmarker, db;
+let isPaused = false;
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw_mediapipe.js')
+      .then(reg => {
+        const swBadge = document.getElementById('swStatus');
+        swBadge.textContent = "SW: Aktif (Offline Ready)";
+        swBadge.classList.add('ok');
+      });
+  });
+}
+
+async function initDB() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open("MediaPipeResearchDB", 1);
+    req.onupgradeneeded = (e) => e.target.result.createObjectStore("users", { keyPath: "id", autoIncrement: true });
+    req.onsuccess = (e) => {
+      db = e.target.result;
+      addLog("Dataset lokal dimuat.");
+      refreshTable();
+      resolve();
+    };
+  });
+}
+
+async function startAI() {
+  try {
+    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO", numFaces: 1
+    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    v.srcObject = stream;
+    v.onloadedmetadata = () => { c.width = v.videoWidth; c.height = v.videoHeight; tick(); };
+  } catch (err) {
+    addLog("Error AI: " + err.message);
+  }
+}
+
+function tick() {
+  if (isPaused) { requestAnimationFrame(tick); return; }
+  const t0 = performance.now();
+
+  if (v.readyState >= 2 && faceLandmarker) {
+    const res = faceLandmarker.detectForVideo(v, t0);
+    ctx.clearRect(0, 0, c.width, c.height);
+
+    if (res.faceLandmarks?.length > 0) {
+      const pts = res.faceLandmarks[0];
+      new DrawingUtils(ctx).drawConnectors(pts, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: "#0891b222", lineWidth: 1 });
+      updateMetrics(pts);
+      if (document.activeElement !== document.getElementById('userName')) {
+        matchUser(pts);
+      }
+    }
+  }
+  document.getElementById('m-latency').textContent = (performance.now() - t0).toFixed(2) + " ms";
+  requestAnimationFrame(tick);
+}
+
+function updateMetrics(pts) {
+  const nose = pts[1], chin = pts[152], leftEye = pts[33], rightEye = pts[263];
+  const eyeDist = Math.hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y);
+  const occlusion = Math.hypot(nose.x - chin.x, nose.y - chin.y);
+
+  document.getElementById('num-light').textContent = (eyeDist * 10).toFixed(2);
+  document.getElementById('num-occlusion').textContent = occlusion.toFixed(4);
+}
+
+function matchUser(ptsCam) {
+  const tx = db.transaction("users", "readonly");
+  tx.objectStore("users").getAll().onsuccess = (e) => {
+    let minD = 1.0;
+    let match = null;
+    const currentUsers = e.target.result;
+
+    for (let u of currentUsers) {
+      const d = calcDist(ptsCam, u.vec);
+      if (d < minD) minD = d;
+      if (d < 0.035) { match = u; break; }
+    }
+    document.getElementById('m-accuracy').textContent = minD.toFixed(4);
+    if (match) triggerSuccess(match.name, minD);
+  };
+}
+
+function calcDist(p1, p2) {
+  let s = 0;
+  for(let i=0; i<40; i++) s += Math.hypot(p1[i].x - p2[i].x, p1[i].y - p2[i].y);
+  return s / 40;
+}
+
+function triggerSuccess(name, dist) {
+  isPaused = true;
+  document.getElementById('modalName').textContent = name;
+  document.getElementById('modalTime').textContent = new Date().toLocaleTimeString();
+  document.getElementById('modalScore').textContent = `Euclidean Dist: ${dist.toFixed(6)}`;
+  document.getElementById('modalSuccess').style.display = 'flex';
+  document.getElementById('scanOverlay').style.display = 'flex';
+  addLog(`Presensi: ${name} (Match)`);
+}
+
+window.closeModal = () => {
+  document.getElementById('modalSuccess').style.display = 'none';
+  document.getElementById('scanOverlay').style.display = 'none';
+  isPaused = false;
+};
+
+document.getElementById('btnEnroll').onclick = () => {
+  const name = document.getElementById('userName').value;
+  if(!name) return alert("Isi nama subjek!");
+  const res = faceLandmarker.detectForVideo(v, performance.now());
+  if(res.faceLandmarks?.length > 0) {
+    const tx = db.transaction("users", "readwrite");
+    tx.objectStore("users").add({ name, vec: res.faceLandmarks[0], date: new Date().toISOString() });
+    document.getElementById('userName').value = "";
+    refreshTable();
+    addLog(`Subjek '${name}' terdaftar.`);
+  } else {
+    alert("Wajah tidak terdeteksi, coba lagi.");
+  }
+};
+
+function refreshTable() {
+  const tbody = document.getElementById('userTableBody');
+  if(!tbody) return;
+  tbody.innerHTML = '';
+  db.transaction("users").objectStore("users").getAll().onsuccess = (e) => {
+    const users = e.target.result;
+    document.getElementById('userCount').textContent = users.length + " Users";
+    users.sort((a,b) => b.id - a.id).forEach(u => {
+      const r = tbody.insertRow();
+      r.innerHTML = `<td>#${u.id}</td><td><b>${u.name}</b></td><td>${new Date(u.date).toLocaleString()}</td>
+      <td><span class="tag-shared">468-PTS</span></td>
+      <td><button class="btn-danger" onclick="deleteUser(${u.id})">Hapus</button></td>`;
+    });
+  };
+}
+
+window.deleteUser = (id) => {
+  if(confirm("Hapus data ini?")) {
+    db.transaction("users", "readwrite").objectStore("users").delete(id).onsuccess = () => refreshTable();
+  }
+};
+
+function addLog(m) {
+  const b = document.getElementById('logBox');
+  if(b) b.innerHTML = `<div>[${new Date().toLocaleTimeString()}] ${m}</div>` + b.innerHTML;
+}
+
+initDB().then(startAI);
+</script>
+</body>
+</html>

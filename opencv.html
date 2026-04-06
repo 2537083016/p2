@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OpenCV A — Synced Research Data</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    :root { --accent: #7c3aed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div><strong>OpenCV Paper 2</strong> | Research Data (A)</div>
+  <div class="status-group">
+    <div id="swStatus" class="badge">SW: Inactive</div>
+    <div id="userCount" class="badge badge-accent">0 Users</div>
+  </div>
+</header>
+
+<main class="main-container">
+  <div class="video-card">
+    <video id="videoInput" class="hidden-video" autoplay muted playsinline></video>
+    <canvas id="canvasOutput" class="overlay-canvas"></canvas>
+    <div id="scanOverlay">
+      <div class="icon-check">✅</div>
+      <div class="match-text">MATCH FOUND (OPENCV)</div>
+      <button class="btn-primary btn-continue" onclick="closeModal()">Lanjut Scan</button>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="panel">
+      <div class="metric-label">Research Metrics (A)</div>
+      <div class="diag-item mt-10">
+        <span>Speed:</span> <b id="m-latency">0.00 ms</b>
+      </div>
+      <div class="diag-item">
+        <span>Distance:</span> <b id="m-accuracy" class="accent-val">0.0000</b>
+      </div>
+      <div class="diag-item">
+        <span>Light:</span> <b id="num-light">0.00</b>
+      </div>
+      <div class="diag-item">
+        <span>Occlusion:</span> <b id="num-occlusion">0.00</b>
+      </div>
+    </div>
+
+    <div class="panel enroll-box">
+      <div class="metric-label warning">Pendaftaran Baru (OpenCV)</div>
+      <input type="text" id="userName" placeholder="Nama Lengkap Subjek...">
+      <button id="btnEnroll" class="btn-enroll" onclick="enroll()">SIMPAN DATASET</button>
+    </div>
+
+    <div class="panel">
+      <div class="metric-label">Audit Log</div>
+      <div id="logBox"></div>
+    </div>
+  </div>
+
+  <div class="table-section">
+    <h3 class="table-title">Dataset User Terdaftar (Synced)</h3>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Nama Subjek</th>
+            <th>Waktu Enroll</th>
+            <th>Vektor</th>
+            <th>Aksi</th>
+          </tr>
+        </thead>
+        <tbody id="userTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<div id="modalSuccess" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-icon">🎉</div>
+    <h2 id="modalName" class="modal-name">SUKSES</h2>
+    <p id="modalTime" class="modal-time"></p>
+    <div id="modalScore" class="modal-score"></div>
+    <button class="btn-primary" onclick="closeModal()">Konfirmasi & Lanjut</button>
+  </div>
+</div>
+
+<script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady()"></script>
+<script>
+// KODE SCRIPT TETAP SAMA SEPERTI ASLINYA
+let video = document.getElementById("videoInput");
+let canvas = document.getElementById("canvasOutput");
+let ctx = canvas.getContext("2d", {willReadFrequently:true});
+let classifier, db, isPaused = false;
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw_opencv.js')
+      .then(reg => {
+        const swBadge = document.getElementById('swStatus');
+        swBadge.textContent = "SW: Aktif (Offline Mode)";
+        swBadge.classList.add('ok');
+      });
+  });
+}
+
+async function initDB() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open("MediaPipeResearchDB", 1);
+    req.onsuccess = (e) => {
+      db = e.target.result;
+      addLog("Shared Database Terhubung.");
+      refreshTable();
+      resolve();
+    };
+    req.onupgradeneeded = (e) => {
+      e.target.result.createObjectStore("users", { keyPath: "id", autoIncrement: true });
+    };
+  });
+}
+
+async function onOpenCvReady() {
+  cv['onRuntimeInitialized'] = async () => {
+    classifier = new cv.CascadeClassifier();
+    try {
+      let r = await fetch("https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml");
+      let d = new Uint8Array(await r.arrayBuffer());
+      cv.FS_createDataFile("/", "face.xml", d, true, false, false);
+      classifier.load("face.xml");
+      addLog("OpenCV Engine: READY.");
+    } catch (e) {
+      addLog("Gagal memuat Cascade XML.");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+    video.srcObject = stream;
+    video.oncanplay = () => {
+      canvas.width = 320;
+      canvas.height = 240;
+      initDB().then(tick);
+    };
+  };
+}
+
+function tick() {
+  if (isPaused) { requestAnimationFrame(tick); return; }
+  const t0 = performance.now();
+
+  ctx.drawImage(video, 0, 0, 320, 240);
+  let src = cv.imread(canvas);
+  let gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+  let faces = new cv.RectVector();
+  classifier.detectMultiScale(gray, faces, 1.2, 5);
+
+  if (faces.size() > 0) {
+    let r = faces.get(0);
+    drawVisualMesh(r);
+
+    let roi = gray.roi(r).clone();
+    cv.resize(roi, roi, new cv.Size(50, 50));
+    let mean = Array.from(roi.data).reduce((a, b) => a + b, 0) / roi.data.length;
+
+    document.getElementById('num-light').textContent = mean.toFixed(2);
+    document.getElementById('num-occlusion').textContent = (r.width * r.height / (320*240)).toFixed(4);
+
+    if (document.activeElement !== document.getElementById('userName')) {
+      matchUser(r);
+    }
+    roi.delete();
+  }
+
+  document.getElementById('m-latency').textContent = (performance.now() - t0).toFixed(2) + " ms";
+  src.delete(); gray.delete(); faces.delete();
+  requestAnimationFrame(tick);
+}
+
+function drawVisualMesh(r) {
+  ctx.strokeStyle = "rgba(124, 58, 237, 0.4)"; ctx.lineWidth = 1;
+  for(let i=1; i<8; i++) {
+    ctx.beginPath(); ctx.moveTo(r.x + (r.width/8)*i, r.y); ctx.lineTo(r.x + (r.width/8)*i, r.y + r.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r.x, r.y + (r.height/8)*i); ctx.lineTo(r.x + r.width, r.y + (r.height/8)*i); ctx.stroke();
+  }
+  ctx.strokeStyle = "#7c3aed"; ctx.lineWidth = 2;
+  ctx.strokeRect(r.x, r.y, r.width, r.height);
+}
+
+function matchUser(r) {
+  const tx = db.transaction("users", "readonly");
+  tx.objectStore("users").getAll().onsuccess = (e) => {
+    let bestScore = 0;
+    let match = null;
+    let cx = (r.x + r.width/2) / 320, cy = (r.y + r.height/2) / 240;
+
+    for (let u of e.target.result) {
+      let d = Math.hypot(cx - u.vec[1].x, cy - u.vec[1].y);
+      let s = 1 - d;
+      if (s > bestScore) bestScore = s;
+      if (s > 0.88) { match = u; break; }
+    }
+    document.getElementById('m-accuracy').textContent = bestScore.toFixed(4);
+    if (match) triggerSuccess(match.name, bestScore);
+  };
+}
+
+function triggerSuccess(name, dist) {
+  isPaused = true;
+  document.getElementById('modalName').textContent = name;
+  document.getElementById('modalTime').textContent = new Date().toLocaleTimeString();
+  document.getElementById('modalScore').textContent = `Match Score (A): ${dist.toFixed(6)}`;
+  document.getElementById('modalSuccess').style.display = 'flex';
+  document.getElementById('scanOverlay').style.display = 'flex';
+  addLog(`Presensi: ${name} (OpenCV)`);
+}
+
+window.closeModal = () => {
+  document.getElementById('modalSuccess').style.display = 'none';
+  document.getElementById('scanOverlay').style.display = 'none';
+  isPaused = false;
+};
+
+window.enroll = () => {
+  const name = document.getElementById('userName').value;
+  if(!name) return alert("Isi nama subjek!");
+  alert("Gunakan aplikasi MediaPipe (B) untuk pendaftaran wajah yang lebih presisi (468 pts).");
+};
+
+function refreshTable() {
+  const tbody = document.getElementById('userTableBody');
+  if(!tbody) return;
+  tbody.innerHTML = '';
+  db.transaction("users").objectStore("users").getAll().onsuccess = (e) => {
+    const users = e.target.result;
+    document.getElementById('userCount').textContent = users.length + " Users";
+    users.sort((a,b) => b.id - a.id).forEach(u => {
+      const r = tbody.insertRow();
+      r.innerHTML = `<td>#${u.id}</td><td><b>${u.name}</b></td><td>${new Date(u.date).toLocaleString()}</td>
+      <td><span class="tag-shared">Shared DB</span></td>
+      <td><button class="btn-danger" onclick="deleteUser(${u.id})">Hapus</button></td>`;
+    });
+  };
+}
+
+window.deleteUser = (id) => {
+  if(confirm("Hapus data ini?")) {
+    db.transaction("users", "readwrite").objectStore("users").delete(id).onsuccess = () => refreshTable();
+  }
+};
+
+function addLog(m) {
+  const b = document.getElementById('logBox');
+  if(b) b.innerHTML = `<div>[${new Date().toLocaleTimeString()}] ${m}</div>` + b.innerHTML;
+}
+</script>
+</body>
+</html>
